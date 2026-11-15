@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Inbox Sorter</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+:root{--bg:#f6f7f4;--card:#fff;--ink:#1b2320;--mute:#6b766f;--line:#dfe3dc;
+--buy:#1f7a4d;--people:#2457c5;--ads:#b5651d}
+@media (prefers-color-scheme:dark){:root{--bg:#141815;--card:#1d231f;--ink:#eef2ee;--mute:#93a097;--line:#2e3731;
+--buy:#4cc58a;--people:#7ea6ff;--ads:#e8a463}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+padding:env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 24px)}
+main{max-width:560px;margin:0 auto}
+h1{font-size:26px;margin:24px 0 4px;letter-spacing:-.02em}
+p.sub{color:var(--mute);margin:0 0 20px}
+button{font:inherit;border:0;border-radius:12px;padding:14px 18px;background:var(--ink);color:var(--bg);font-weight:600;width:100%;cursor:pointer}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button:disabled{opacity:.5}
+button:focus-visible,input:focus-visible{outline:3px solid var(--people);outline-offset:2px}
+.row{display:flex;gap:10px;margin:12px 0}
+label.opt{display:flex;gap:10px;align-items:flex-start;color:var(--mute);font-size:14px;margin:12px 0}
+input[type=text]{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit}
+.tabs{display:flex;gap:8px;margin:18px 0 8px}
+.tab{flex:1;padding:10px 6px;border-radius:12px;background:var(--card);border:2px solid var(--line);text-align:center;font-size:14px;cursor:pointer;font-weight:600}
+.tab b{display:block;font-size:22px}
+.tab[aria-selected=true]{border-color:currentColor}
+.tab.buy{color:var(--buy)}.tab.people{color:var(--people)}.tab.ads{color:var(--ads)}
+.tab span{color:var(--ink);font-weight:500}
+ul{list-style:none;padding:0;margin:0}
+li{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:8px 0}
+li .from{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+li .subj{font-size:14px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#status{color:var(--mute);font-size:14px;min-height:20px;margin:10px 0}
+.hide{display:none}
+.note{font-size:13px;color:var(--mute);margin-top:20px}
+</style>
+</head>
+<body>
+<main>
+<h1>Inbox Sorter</h1>
+<p class="sub">Sorts your Gmail into Purchases, People and Ads.</p>
+
+<section id="setup">
+  <label for="cid" class="sub" style="display:block;margin-bottom:6px">Google OAuth client ID</label>
+  <input id="cid" type="text" placeholder="123456-abc.apps.googleusercontent.com" autocomplete="off">
+  <div class="row"><button id="signin">Connect Gmail</button></div>
+  <p class="note">One-time setup: create a Web OAuth client ID in Google Cloud Console, enable the Gmail API, and add this page's address as an authorized JavaScript origin.</p>
+</section>
+
+<section id="app" class="hide">
+  <div class="row"><button id="scan">Scan latest 100 emails</button></div>
+  <label class="opt"><input type="checkbox" id="archive"> Also move sorted emails out of the inbox (they stay in their new folder)</label>
+  <div id="status"></div>
+  <div class="tabs" role="tablist">
+    <div class="tab buy" role="tab" tabindex="0" data-k="buy" aria-selected="true"><b id="n-buy">0</b><span>Purchases</span></div>
+    <div class="tab people" role="tab" tabindex="0" data-k="people" aria-selected="false"><b id="n-people">0</b><span>People</span></div>
+    <div class="tab ads" role="tab" tabindex="0" data-k="ads" aria-selected="false"><b id="n-ads">0</b><span>Ads</span></div>
+  </div>
+  <ul id="list"></ul>
+  <div class="row"><button id="apply" disabled>Apply folders</button></div>
+  <div class="row"><button class="ghost" id="signout">Disconnect</button></div>
+</section>
+<p class="note">Everything runs in your browser. Emails are read straight from Google and never sent anywhere else. Gmail folders are labels, so a message can be found under its folder name in the Gmail app.</p>
+</main>
+
+<script>
+const API='https://gmail.googleapis.com/gmail/v1/users/me';
+const SCOPE='https://www.googleapis.com/auth/gmail.modify';
+const FOLDERS={buy:'Purchases',people:'People',ads:'Ads'};
+let token=null,tc=null,results={buy:[],people:[],ads:[]},active='buy';
+const $=id=>document.getElementById(id);
+const status=t=>$('status').textContent=t;
+
+try{$('cid').value=localStorage.getItem('cid')||''}catch(e){}
+
+$('signin').onclick=()=>{
+  const id=$('cid').value.trim();
+  if(!id){alert('Paste your OAuth client ID first.');return}
+  try{localStorage.setItem('cid',id)}catch(e){}
+  if(!window.google){alert('Google sign-in is still loading. Try again in a moment.');return}
+  tc=google.accounts.oauth2.initTokenClient({client_id:id,scope:SCOPE,callback:r=>{
+    if(r.error){alert('Sign-in failed: '+r.error);return}
+    token=r.access_token;$('setup').classList.add('hide');$('app').classList.remove('hide');
+  }});
+  tc.requestAccessToken();
+};
+$('signout').onclick=()=>{
+  if(token)google.accounts.oauth2.revoke(token,()=>{});
+  token=null;results={buy:[],people:[],ads:[]};render();
+  $('app').classList.add('hide');$('setup').classList.remove('hide');
+};
+
+async function g(path,opt={}){
+  const r=await fetch(API+path,{...opt,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}});
+  if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error?.message||r.status);
+  return r.json();
+}
+
+const BUY_WORDS=/\b(receipt|order (confirmation|confirmed|#|number)|your order|invoice|payment (received|confirmation)|thank you for your (order|purchase)|purchase|has shipped|shipped|out for delivery|delivered|subscription renewal|billing|refund|booking confirmation|e-?ticket|itinerary)\b/i;
+const BUY_FROM=/(receipt|orders?|billing|invoice|payments?|shipping|noreply@(amazon|paypal|apple|uber|doordash))/i;
+const BOT_FROM=/(no-?reply|do-?not-?reply|notifications?@|mailer|newsletter|news@|marketing|offers?@|deals?@|promo|updates?@|info@|hello@|team@)/i;
+
+function classify(m){
+  const h={};(m.payload?.headers||[]).forEach(x=>h[x.name.toLowerCase()]=x.value);
+  const labels=m.labelIds||[],from=h.from||'',subj=h.subject||'';
+  const bulk=!!h['list-unsubscribe']||/bulk|list|junk/i.test(h.precedence||'')||!!h['list-id'];
+  let k;
+  if(BUY_WORDS.test(subj)||BUY_FROM.test(from)&&!labels.includes('CATEGORY_PROMOTIONS')&&/order|receipt|invoice|payment|shipped|delivery/i.test(subj+from))k='buy';
+  else if(labels.includes('CATEGORY_PROMOTIONS')||labels.includes('CATEGORY_SOCIAL')||bulk||BOT_FROM.test(from))k='ads';
+  else k='people';
+  return {id:m.id,from:from.replace(/<.*>/,'').replace(/"/g,'').trim()||from,subj:subj||'(no subject)',k};
+}
+
+$('scan').onclick=async()=>{
+  $('scan').disabled=true;$('apply').disabled=true;results={buy:[],people:[],ads:[]};render();
+  try{
+    status('Reading your inbox...');
+    const list=await g('/messages?maxResults=100&q='+encodeURIComponent('in:inbox'));
+    const ids=(list.messages||[]).map(m=>m.id);
+    if(!ids.length){status('Inbox is empty.');return}
+    let done=0;
+    const q=[...ids];
+    const worker=async()=>{while(q.length){const id=q.shift();
+      try{const m=await g('/messages/'+id+'?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=List-Unsubscribe&metadataHeaders=List-Id&metadataHeaders=Precedence');
+        const c=classify(m);results[c.k].push(c);}catch(e){}
+      done++;status('Sorting '+done+' of '+ids.length+'...');}};
+    await Promise.all([worker(),worker(),worker(),worker(),worker()]);
+    status('Done. Review each tab, then apply.');
+    $('apply').disabled=false;render();
+  }catch(e){status('Error: '+e.message)}
+  finally{$('scan').disabled=false}
+};
+
+function render(){
+  for(const k in FOLDERS)$('n-'+k).textContent=results[k].length;
+  document.querySelectorAll('.tab').forEach(t=>t.setAttribute('aria-selected',t.dataset.k===active));
+  const ul=$('list');ul.innerHTML='';
+  results[active].forEach(r=>{
+    const li=document.createElement('li');
+    const a=document.createElement('div');a.className='from';a.textContent=r.from;
+    const b=document.createElement('div');b.className='subj';b.textContent=r.subj;
+    li.append(a,b);ul.append(li);
+  });
+}
+document.querySelectorAll('.tab').forEach(t=>{
+  const go=()=>{active=t.dataset.k;render()};
+  t.onclick=go;t.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();go()}};
+});
+
+async function labelId(name){
+  const all=await g('/labels');
+  const f=all.labels.find(l=>l.name===name);
+  if(f)return f.id;
+  return (await g('/labels',{method:'POST',body:JSON.stringify({name,labelListVisibility:'labelShow',messageListVisibility:'show'})})).id;
+}
+
+$('apply').onclick=async()=>{
+  $('apply').disabled=true;
+  try{
+    for(const k in FOLDERS){
+      const ids=results[k].map(r=>r.id);
+      if(!ids.length)continue;
+      status('Filing '+FOLDERS[k]+'...');
+      const lid=await labelId(FOLDERS[k]);
+      for(let i=0;i<ids.length;i+=100){
+        const body={ids:ids.slice(i,i+100),addLabelIds:[lid]};
+        if($('archive').checked)body.removeLabelIds=['INBOX'];
+        await g('/messages/batchModify',{method:'POST',body:JSON.stringify(body)});
+      }
+    }
+    status('Done. Open Gmail and look for the Purchases, People and Ads folders.');
+  }catch(e){status('Error: '+e.message);$('apply').disabled=false}
+};
+</script>
+</body>
+</html>
