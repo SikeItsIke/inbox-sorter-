@@ -35,6 +35,13 @@ li .from{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-
 li .subj{font-size:14px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #status{color:var(--mute);font-size:14px;min-height:20px;margin:10px 0}
 .hide{display:none}
+li.msg{cursor:pointer}
+li.msg:focus-visible{outline:3px solid var(--people);outline-offset:2px}
+.meta{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:12px 0;font-size:14px;word-break:break-word}
+.meta h2{font-size:18px;margin:0 0 8px}
+.meta div{color:var(--mute)}
+iframe#frame{width:100%;height:65vh;border:1px solid var(--line);border-radius:12px;background:#fff}
+pre#plain{white-space:pre-wrap;word-break:break-word;font:inherit;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:0}
 .note{font-size:13px;color:var(--mute);margin-top:20px}
 </style>
 </head>
@@ -62,6 +69,13 @@ li .subj{font-size:14px;color:var(--mute);white-space:nowrap;overflow:hidden;tex
   <ul id="list"></ul>
   <div class="row"><button id="apply" disabled>Apply folders</button></div>
   <div class="row"><button class="ghost" id="signout">Disconnect</button></div>
+</section>
+<section id="view" class="hide">
+  <div class="row"><button class="ghost" id="back">Back to list</button></div>
+  <div class="meta"><h2 id="v-subj"></h2><div id="v-from"></div><div id="v-to"></div><div id="v-date"></div><div id="v-att"></div></div>
+  <div class="row"><button class="ghost" id="imgs">Show images</button></div>
+  <iframe id="frame" sandbox="allow-popups allow-popups-to-escape-sandbox" title="Email"></iframe>
+  <pre id="plain" class="hide"></pre>
 </section>
 <p class="note">Everything runs in your browser. Emails are read straight from Google and never sent anywhere else. Gmail folders are labels, so a message can be found under its folder name in the Gmail app.</p>
 </main>
@@ -139,12 +153,43 @@ $('scan').onclick=async()=>{
   finally{$('scan').disabled=false}
 };
 
+
+function b64(s){s=s.replace(/-/g,'+').replace(/_/g,'/');const bin=atob(s);return new TextDecoder().decode(Uint8Array.from(bin,c=>c.charCodeAt(0)))}
+function findPart(p,type){if(p.mimeType===type&&p.body&&p.body.data)return p;for(const c of p.parts||[]){const f=findPart(c,type);if(f)return f}return null}
+function attachments(p,out=[]){if(p.filename)out.push(p.filename);(p.parts||[]).forEach(c=>attachments(c,out));return out}
+let curHtml='',curText='',showImgs=false;
+function frameDoc(){
+  const img=showImgs?"img-src https: data:":"img-src data:";
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; '+img+'"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font:15px/1.5 system-ui,sans-serif;margin:12px;word-break:break-word;color:#111}img{max-width:100%;height:auto}table{max-width:100%}</style></head><body>'+curHtml+'</body></html>';
+}
+async function openMsg(id){
+  $('app').classList.add('hide');$('view').classList.remove('hide');window.scrollTo(0,0);
+  $('v-subj').textContent='Loading...';['v-from','v-to','v-date','v-att'].forEach(x=>$(x).textContent='');
+  $('frame').classList.add('hide');$('plain').classList.add('hide');$('imgs').classList.add('hide');
+  try{
+    const m=await g('/messages/'+id+'?format=full');
+    const h={};(m.payload.headers||[]).forEach(x=>h[x.name.toLowerCase()]=x.value);
+    $('v-subj').textContent=h.subject||'(no subject)';
+    $('v-from').textContent='From: '+(h.from||'');
+    $('v-to').textContent='To: '+(h.to||'');
+    $('v-date').textContent=h.date||'';
+    const att=attachments(m.payload);
+    $('v-att').textContent=att.length?'Attachments (open in Gmail): '+att.join(', '):'';
+    const ph=findPart(m.payload,'text/html'),pt=findPart(m.payload,'text/plain');
+    curHtml=ph?b64(ph.body.data):'';curText=pt?b64(pt.body.data):'';showImgs=false;
+    if(curHtml){$('frame').srcdoc=frameDoc();$('frame').classList.remove('hide');$('imgs').textContent='Show images';$('imgs').classList.remove('hide')}
+    else{$('plain').textContent=curText||m.snippet||'(no readable content)';$('plain').classList.remove('hide')}
+  }catch(e){$('v-subj').textContent='Could not open this email: '+e.message}
+}
+$('imgs').onclick=()=>{showImgs=!showImgs;$('imgs').textContent=showImgs?'Hide images':'Show images';$('frame').srcdoc=frameDoc()};
+$('back').onclick=()=>{$('view').classList.add('hide');$('app').classList.remove('hide');$('frame').srcdoc=''};
+
 function render(){
   for(const k in FOLDERS)$('n-'+k).textContent=results[k].length;
   document.querySelectorAll('.tab').forEach(t=>t.setAttribute('aria-selected',t.dataset.k===active));
   const ul=$('list');ul.innerHTML='';
   results[active].forEach(r=>{
-    const li=document.createElement('li');
+    const li=document.createElement('li');li.className='msg';li.tabIndex=0;li.setAttribute('role','button');li.onclick=()=>openMsg(r.id);li.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openMsg(r.id)}};
     const a=document.createElement('div');a.className='from';a.textContent=r.from;
     const b=document.createElement('div');b.className='subj';b.textContent=r.subj;
     li.append(a,b);ul.append(li);
