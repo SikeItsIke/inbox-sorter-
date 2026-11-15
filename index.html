@@ -133,6 +133,7 @@ const $=id=>document.getElementById(id);
 const say=t=>$('status').textContent=t;
 const mSay=t=>$('mstatus').textContent=t;
 
+const LS={get:k=>{try{return localStorage.getItem(k)}catch(e){return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}},del:k=>{try{localStorage.removeItem(k)}catch(e){}}};
 const IC={
  sorter:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
  inbox:'<path d="M3 13l3-8h12l3 8v6H3z"/><path d="M3 13h5l1 3h6l1-3h5"/>',
@@ -218,38 +219,54 @@ async function loadCounts(){
   buildNav();
 }
 
-function signedIn(){showPane('app');curBox='sorter';buildNav();loadCounts()}
+function signedIn(){LS.set('remember','1');showPane('app');curBox='sorter';buildNav();loadCounts()}
 
 try{$('cid').value=localStorage.getItem('cid')||''}catch(e){}
 
-window.onNativeToken=t=>{token=t;signedIn()};
+let tokenWaiters=[];
+window.onNativeToken=t=>{
+  token=t;
+  if(tokenWaiters.length){const w=tokenWaiters;tokenWaiters=[];w.forEach(f=>f())}
+  else if(pane==='setup')signedIn();
+};
 if(window.Android){
   $('cid').classList.add('hide');
   document.querySelector('label[for=cid]').classList.add('hide');
   document.querySelector('#setup .note').classList.add('hide');
 }
 
+function webAuth(silent){
+  const id=$('cid').value.trim();
+  if(!id||!window.google)return false;
+  LS.set('cid',id);
+  tc=google.accounts.oauth2.initTokenClient({client_id:id,scope:SCOPE,
+    callback:r=>{
+      if(r.error){if(!silent)alert('Sign-in failed: '+r.error);return}
+      token=r.access_token;signedIn();
+    },
+    error_callback:()=>{}});
+  tc.requestAccessToken(silent?{prompt:''}:{});
+  return true;
+}
 $('signin').onclick=()=>{
   if(window.Android){Android.signIn();return}
-  const id=$('cid').value.trim();
-  if(!id){alert('Paste your OAuth client ID first.');return}
-  try{localStorage.setItem('cid',id)}catch(e){}
+  if(!$('cid').value.trim()){alert('Paste your OAuth client ID first.');return}
   if(!window.google){alert('Google sign-in is still loading. Try again in a moment.');return}
-  tc=google.accounts.oauth2.initTokenClient({client_id:id,scope:SCOPE,callback:r=>{
-    if(r.error){alert('Sign-in failed: '+r.error);return}
-    token=r.access_token;signedIn();
-  }});
-  tc.requestAccessToken();
+  webAuth(false);
 };
 $('signout').onclick=()=>{
   if(token&&window.google)google.accounts.oauth2.revoke(token,()=>{});
-  token=null;results={buy:[],people:[],ads:[]};mItems=[];labelMap={};
+  LS.del('remember');token=null;results={buy:[],people:[],ads:[]};mItems=[];labelMap={};
   BOXES.forEach(b=>b.n=0);render();closeDrawer();showPane('setup');
 };
 
-async function g(path,opt={}){
+async function g(path,opt={},retry=true){
   const r=await fetch(API+path,{...opt,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'}});
-  if(r.status===401&&window.Android){Android.signIn();throw new Error('Session expired. Signing in again, then retry.')}
+  if(r.status===401&&window.Android&&retry){
+    const first=!tokenWaiters.length;
+    await new Promise(res=>{tokenWaiters.push(res);if(first)Android.signIn();setTimeout(res,15000)});
+    return g(path,opt,false);
+  }
   if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error?.message||r.status);
   return r.json();
 }
@@ -462,6 +479,24 @@ $('apply').onclick=async()=>{
     loadCounts();
   }catch(e){say('Error: '+e.message);$('apply').disabled=false}
 };
+
+window.handleBack=()=>{
+  if($('side').classList.contains('open')){closeDrawer();return true}
+  if(pane==='view'){closeView();return true}
+  if(pane==='mail'){openBox('sorter');return true}
+  return false;
+};
+
+/* stay signed in: try to sign in again automatically on launch */
+window.addEventListener('load',()=>{
+  if(LS.get('remember')!=='1')return;
+  if(window.Android){Android.signIn();return}
+  let tries=0;
+  const t=setInterval(()=>{
+    if(window.google){clearInterval(t);webAuth(true)}
+    else if(++tries>20)clearInterval(t);
+  },250);
+});
 </script>
 </body>
 </html>
