@@ -99,18 +99,23 @@ async function g(path,opt={}){
   return r.json();
 }
 
-const BUY_WORDS=/\b(receipt|order (confirmation|confirmed|#|number)|your order|invoice|payment (received|confirmation)|thank you for your (order|purchase)|purchase|has shipped|shipped|out for delivery|delivered|subscription renewal|billing|refund|booking confirmation|e-?ticket|itinerary)\b/i;
-const BUY_FROM=/(receipt|orders?|billing|invoice|payments?|shipping|noreply@(amazon|paypal|apple|uber|doordash))/i;
-const BOT_FROM=/(no-?reply|do-?not-?reply|notifications?@|mailer|newsletter|news@|marketing|offers?@|deals?@|promo|updates?@|info@|hello@|team@)/i;
+const BUY_SUBJ=/\b(receipt|statements?|transactions?|order|invoice|payment|paid|you sent|sent you|charged|charge|bill|billing|deposit|withdrawal|refund|purchase|shipped|shipping|out for delivery|delivered|tracking|subscription|renewal|e-?ticket|itinerary|booking|cash ?app|direct deposit|balance)\b/i;
+const FIN_FROM=/(cash\.app|cashapp|square(up)?\.com|venmo|paypal|zelle|stripe|affirm|klarna|afterpay|amazon|ebay|etsy|shopify|apple\.com|uber|lyft|doordash|grubhub|instacart|walmart|target\.com|bestbuy|chase|bankofamerica|wellsfargo|capitalone|citi|discover|americanexpress|usps|ups\.com|fedex|dhl|netflix|spotify|hulu)/i;
+const PROMO_SUBJ=/(\d+% off|sale|deal|offer|save |coupon|promo|limited time|free shipping|new arrivals|don.t miss)/i;
+const BOT_FROM=/(no-?reply|do-?not-?reply|notifications?@|mailer|newsletter|news@|marketing|offers?@|deals?@|promo|updates?@|info@|hello@|team@|support@|alerts?@|billing@|service@|admin@)/i;
 
 function classify(m){
   const h={};(m.payload?.headers||[]).forEach(x=>h[x.name.toLowerCase()]=x.value);
   const labels=m.labelIds||[],from=h.from||'',subj=h.subject||'';
   const bulk=!!h['list-unsubscribe']||/bulk|list|junk/i.test(h.precedence||'')||!!h['list-id'];
+  const promo=labels.includes('CATEGORY_PROMOTIONS')||PROMO_SUBJ.test(subj);
+  const fin=FIN_FROM.test(from);
+  const bot=BOT_FROM.test(from)||/auto-submitted|bulk/i.test(h['auto-submitted']||'')||bulk;
   let k;
-  if(BUY_WORDS.test(subj)||BUY_FROM.test(from)&&!labels.includes('CATEGORY_PROMOTIONS')&&/order|receipt|invoice|payment|shipped|delivery/i.test(subj+from))k='buy';
-  else if(labels.includes('CATEGORY_PROMOTIONS')||labels.includes('CATEGORY_SOCIAL')||bulk||BOT_FROM.test(from))k='ads';
-  else k='people';
+  if(!promo&&(BUY_SUBJ.test(subj)||fin&&!PROMO_SUBJ.test(subj)))k='buy';
+  else if(promo||labels.includes('CATEGORY_SOCIAL')||(bulk&&!fin))k='ads';
+  else if(!bot&&!fin&&(labels.includes('CATEGORY_PERSONAL')||!labels.some(l=>l.startsWith('CATEGORY_'))))k='people';
+  else k='skip';
   return {id:m.id,from:from.replace(/<.*>/,'').replace(/"/g,'').trim()||from,subj:subj||'(no subject)',k};
 }
 
@@ -121,14 +126,14 @@ $('scan').onclick=async()=>{
     const list=await g('/messages?maxResults=100&q='+encodeURIComponent('in:inbox'));
     const ids=(list.messages||[]).map(m=>m.id);
     if(!ids.length){status('Inbox is empty.');return}
-    let done=0;
+    let done=0,skipped=0;
     const q=[...ids];
     const worker=async()=>{while(q.length){const id=q.shift();
       try{const m=await g('/messages/'+id+'?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=List-Unsubscribe&metadataHeaders=List-Id&metadataHeaders=Precedence');
-        const c=classify(m);results[c.k].push(c);}catch(e){}
+        const c=classify(m);if(c.k==='skip')skipped++;else results[c.k].push(c);}catch(e){}
       done++;status('Sorting '+done+' of '+ids.length+'...');}};
     await Promise.all([worker(),worker(),worker(),worker(),worker()]);
-    status('Done. Review each tab, then apply.');
+    status('Done. '+skipped+' unclear emails left in your inbox. Review each tab, then apply.');
     $('apply').disabled=false;render();
   }catch(e){status('Error: '+e.message)}
   finally{$('scan').disabled=false}
