@@ -70,6 +70,12 @@ nav#side{width:220px;flex:none;position:sticky;top:12px;padding-top:24px}
 }
 #toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 20px);transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:20px;font-size:14px;z-index:30}
 code#cidShown{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;word-break:break-all;user-select:all;color:var(--ink)}
+.totals{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin:12px 0;font-size:14px}
+.totals h3{font-size:13px;margin:0 0 6px;color:var(--mute);font-weight:600}
+.totals .r{display:flex;justify-content:space-between;gap:12px;padding:3px 0}
+.totals .r span:last-child{font-variant-numeric:tabular-nums;color:var(--mute)}
+.totals .r b{color:var(--ink);font-weight:700}
+.totals .r.sum{border-top:1px solid var(--line);margin-top:4px;padding-top:6px;font-weight:700}
 </style>
 </head>
 <body>
@@ -95,6 +101,7 @@ code#cidShown{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;w
   <label class="opt"><input type="checkbox" id="incread"> Also include emails I have already read</label>
   <label class="opt"><input type="checkbox" id="archive"> Also move sorted emails out of the inbox (they stay in their new folder)</label>
   <div id="status"></div>
+  <div id="totals" class="totals hide"></div>
   <div class="tabs" role="tablist">
     <div class="tab buy" role="tab" tabindex="0" data-k="buy" aria-selected="true"><b id="n-buy">0</b><span>Purchases</span></div>
     <div class="tab people" role="tab" tabindex="0" data-k="people" aria-selected="false"><b id="n-people">0</b><span>People</span></div>
@@ -212,17 +219,39 @@ function buildNav(){
   });
 }
 
+let profTotal=null;
 async function loadCounts(){
   try{
     const all=await g('/labels');
     labelMap={};all.labels.forEach(l=>labelMap[l.name]=l.id);
-    await Promise.all(BOXES.filter(b=>b.count).map(async b=>{
+    await Promise.all(BOXES.filter(b=>b.label||b.user).map(async b=>{
       const id=b.label||labelMap[b.user];
-      if(!id){b.n=0;return}
-      try{const l=await g('/labels/'+id);b.n=b.count==='total'?l.threadsTotal:l.threadsUnread}catch(e){b.n=0}
+      if(!id){b.n=0;b.total=undefined;return}
+      try{
+        const l=await g('/labels/'+id);
+        if(b.count)b.n=b.count==='total'?l.threadsTotal:l.threadsUnread;
+        b.total=l.messagesTotal;b.unread=l.messagesUnread;
+      }catch(e){b.n=0}
     }));
+    try{const pr=await g('/profile');profTotal=pr.messagesTotal}catch(e){}
   }catch(e){}
-  buildNav();
+  buildNav();renderTotals();
+}
+function renderTotals(){
+  const el=$('totals');el.innerHTML='';
+  const rows=BOXES.filter(b=>b.total!==undefined&&(!b.user||labelMap[b.user]));
+  if(!rows.length){el.classList.add('hide');return}
+  const h=document.createElement('h3');h.textContent='Emails in your Gmail';el.append(h);
+  const add=(name,total,unread,sum)=>{
+    const r=document.createElement('div');r.className='r'+(sum?' sum':'');
+    const a=document.createElement('span');a.textContent=name;
+    const b=document.createElement('span');
+    b.textContent=Number(total).toLocaleString()+(unread?' ('+Number(unread).toLocaleString()+' unread)':'');
+    r.append(a,b);el.append(r);
+  };
+  rows.forEach(b=>add(b.name,b.total,b.unread&&b.id!=='drafts'&&b.id!=='sent'?b.unread:0,false));
+  if(profTotal!==null)add('Whole mailbox',profTotal,0,true);
+  el.classList.remove('hide');
 }
 
 function signedIn(){LS.set('remember','1');showPane('app');curBox='sorter';buildNav();loadCounts()}
@@ -264,7 +293,7 @@ $('signin').onclick=()=>{
 $('signout').onclick=()=>{
   if(token&&window.google)google.accounts.oauth2.revoke(token,()=>{});
   LS.del('remember');token=null;results={buy:[],people:[],ads:[]};mItems=[];labelMap={};
-  BOXES.forEach(b=>b.n=0);render();closeDrawer();showPane('setup');
+  BOXES.forEach(b=>{b.n=0;b.total=undefined;b.unread=undefined});profTotal=null;render();closeDrawer();showPane('setup');
 };
 
 async function g(path,opt={},retry=true){
@@ -357,11 +386,11 @@ function classify(m){
   const sc=scoreMsg(m);
   const arr=[['buy',sc.buy],['ads',sc.ads],['people',sc.ppl]].sort((x,y)=>y[1]-x[1]);
   const best=arr[0][1],second=arr[1][1];
-  let k=arr[0][0];
-  if(best<3||(best-second<2&&best<7))k='skip';
+  let k=arr[0][0],unclear=false;
+  if(best<3||(best-second<2&&best<7)){k='ads';unclear=true}
   const h={};(m.payload?.headers||[]).forEach(x=>h[x.name.toLowerCase()]=x.value);
   const from=h.from||'';
-  return {id:m.id,from:(sc.name||from).replace(/"/g,'').trim()||from,subj:h.subject||'(no subject)',k};
+  return {id:m.id,from:(sc.name||from).replace(/"/g,'').trim()||from,subj:h.subject||'(no subject)',k,unclear};
 }
 /*ENDCLASSIFY*/
 
@@ -376,10 +405,10 @@ $('scan').onclick=async()=>{
     const q=[...ids];
     const worker=async()=>{while(q.length){const id=q.shift();
       try{const m=await g('/messages/'+id+'?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=List-Unsubscribe&metadataHeaders=List-Id&metadataHeaders=Precedence&metadataHeaders=Auto-Submitted');
-        const c=classify(m);if(c.k==='skip')skipped++;else results[c.k].push(c);}catch(e){}
+        const c=classify(m);if(c.unclear)skipped++;results[c.k].push(c);}catch(e){}
       done++;say('Sorting '+done+' of '+ids.length+'...');}};
     await Promise.all([worker(),worker(),worker(),worker(),worker()]);
-    say('Done. '+skipped+' unclear emails left in your inbox. Review each tab, then apply.');
+    say('Done. '+(skipped?skipped+' unclear emails were put in Ads. ':'')+'Review each tab, then apply.');
     $('apply').disabled=false;render();
   }catch(e){say('Error: '+e.message)}
   finally{$('scan').disabled=false}
@@ -426,7 +455,7 @@ async function openBox(id){
   if(id==='sorter'){showPane('app');render();return}
   const b=BOXES.find(x=>x.id===id);
   mbox=b;mItems=[];mNext=null;renderMail();
-  $('mailTitle').textContent=b.name;
+  $('mailTitle').textContent=b.name+(b.total!==undefined?' · '+Number(b.total).toLocaleString()+' emails':'');
   showPane('mail');
   await loadMore(true);
 }
