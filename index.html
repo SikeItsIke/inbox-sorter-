@@ -68,6 +68,8 @@ nav#side{width:220px;flex:none;position:sticky;top:12px;padding-top:24px}
   nav#side.open{transform:none}
   #scrim.open{display:block;position:fixed;inset:0;z-index:10;background:rgba(0,0,0,.35)}
 }
+#toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 20px);transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:20px;font-size:14px;z-index:30}
+code#cidShown{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;word-break:break-all;user-select:all;color:var(--ink)}
 </style>
 </head>
 <body>
@@ -81,6 +83,7 @@ nav#side{width:220px;flex:none;position:sticky;top:12px;padding-top:24px}
 <p class="sub">Sorts your Gmail into Purchases, People and Ads.</p>
 
 <section id="setup">
+  <p class="sub" id="cidLine">the connecting password is <code id="cidShown">898523814128-64sutbc1f1j4kgr9frtc1ah1th8qfept.apps.googleusercontent.com</code></p>
   <label for="cid" class="sub" style="display:block;margin-bottom:6px">Google OAuth client ID</label>
   <input id="cid" type="text" placeholder="123456-abc.apps.googleusercontent.com" autocomplete="off">
   <div class="row"><button id="signin">Connect Gmail</button></div>
@@ -89,6 +92,7 @@ nav#side{width:220px;flex:none;position:sticky;top:12px;padding-top:24px}
 
 <section id="app" class="hide">
   <div class="row"><button id="scan">Scan latest 100 emails</button></div>
+  <label class="opt"><input type="checkbox" id="incread"> Also include emails I have already read</label>
   <label class="opt"><input type="checkbox" id="archive"> Also move sorted emails out of the inbox (they stay in their new folder)</label>
   <div id="status"></div>
   <div class="tabs" role="tablist">
@@ -112,15 +116,15 @@ nav#side{width:220px;flex:none;position:sticky;top:12px;padding-top:24px}
   <div class="row"><button class="ghost" id="back">Back to list</button></div>
   <div class="row acts"><button class="ghost markread">Mark as read</button><button class="danger delbtn">Delete</button></div>
   <div class="meta"><h2 id="v-subj"></h2><div id="v-from"></div><div id="v-to"></div><div id="v-date"></div><div id="v-att"></div></div>
-  <div class="row"><button class="ghost" id="imgs">Show images</button></div>
   <iframe id="frame" sandbox="allow-popups allow-popups-to-escape-sandbox" title="Email"></iframe>
   <pre id="plain" class="hide"></pre>
-  <div class="row acts"><button class="ghost markread">Mark as read</button><button class="danger delbtn">Delete</button></div>
 </section>
 
 <p class="note">Everything runs in your browser. Emails are read straight from Google and never sent anywhere else. Gmail folders are labels, so a message can be found under its folder name in the Gmail app.</p>
 </main>
 </div>
+
+<div id="toast" class="hide" role="status"></div>
 
 <script>
 const API='https://gmail.googleapis.com/gmail/v1/users/me';
@@ -132,6 +136,8 @@ let mbox=null,mItems=[],mNext=null;
 const $=id=>document.getElementById(id);
 const say=t=>$('status').textContent=t;
 const mSay=t=>$('mstatus').textContent=t;
+let toastT;
+function toast(t){const e=$('toast');e.textContent=t;e.classList.remove('hide');clearTimeout(toastT);toastT=setTimeout(()=>e.classList.add('hide'),2500)}
 
 const LS={get:k=>{try{return localStorage.getItem(k)}catch(e){return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}},del:k=>{try{localStorage.removeItem(k)}catch(e){}}};
 const IC={
@@ -230,6 +236,7 @@ window.onNativeToken=t=>{
   else if(pane==='setup')signedIn();
 };
 if(window.Android){
+  $('cidLine').classList.add('hide');
   $('cid').classList.add('hide');
   document.querySelector('label[for=cid]').classList.add('hide');
   document.querySelector('#setup .note').classList.add('hide');
@@ -241,7 +248,7 @@ function webAuth(silent){
   LS.set('cid',id);
   tc=google.accounts.oauth2.initTokenClient({client_id:id,scope:SCOPE,
     callback:r=>{
-      if(r.error){if(!silent)alert('Sign-in failed: '+r.error);return}
+      if(r.error){if(!silent)toast('Sign-in failed: '+r.error);return}
       token=r.access_token;signedIn();
     },
     error_callback:()=>{}});
@@ -250,8 +257,8 @@ function webAuth(silent){
 }
 $('signin').onclick=()=>{
   if(window.Android){Android.signIn();return}
-  if(!$('cid').value.trim()){alert('Paste your OAuth client ID first.');return}
-  if(!window.google){alert('Google sign-in is still loading. Try again in a moment.');return}
+  if(!$('cid').value.trim()){toast('Paste your OAuth client ID first.');return}
+  if(!window.google){toast('Google sign-in is not available in this window. Open the page from your own HTTPS address or the Android app.');return}
   webAuth(false);
 };
 $('signout').onclick=()=>{
@@ -268,40 +275,107 @@ async function g(path,opt={},retry=true){
     return g(path,opt,false);
   }
   if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error?.message||r.status);
-  return r.json();
+  const txt=await r.text();
+  return txt?JSON.parse(txt):{};
 }
 
-const BUY_SUBJ=/\b(receipt|statements?|transactions?|order|invoice|payment|paid|you sent|sent you|charged|charge|bill|billing|deposit|withdrawal|refund|purchase|shipped|shipping|out for delivery|delivered|tracking|subscription|renewal|e-?ticket|itinerary|booking|cash ?app|direct deposit|balance)\b/i;
-const FIN_FROM=/(cash\.app|cashapp|square(up)?\.com|venmo|paypal|zelle|stripe|affirm|klarna|afterpay|amazon|ebay|etsy|shopify|apple\.com|uber|lyft|doordash|grubhub|instacart|walmart|target\.com|bestbuy|chase|bankofamerica|wellsfargo|capitalone|citi|discover|americanexpress|usps|ups\.com|fedex|dhl|netflix|spotify|hulu)/i;
-const PROMO_SUBJ=/(\d+% off|sale|deal|offer|save |coupon|promo|limited time|free shipping|new arrivals|don.t miss)/i;
-const BOT_FROM=/(no-?reply|do-?not-?reply|notifications?@|mailer|newsletter|news@|marketing|offers?@|deals?@|promo|updates?@|info@|hello@|team@|support@|alerts?@|billing@|service@|admin@)/i;
+/*CLASSIFY*/
+const FREEMAIL=/@(gmail|googlemail|yahoo|ymail|outlook|hotmail|live|msn|icloud|me|mac|aol|proton|protonmail|pm|gmx|zoho)\.(com|me|net)$/i;
+const FIN_FROM=/(cash\.app|cashapp|square(up)?\.com|venmo|paypal|zelle|stripe|affirm|klarna|afterpay|amazon|ebay|etsy|shopify|apple\.com|uber|lyft|doordash|grubhub|instacart|walmart|target\.com|bestbuy|costco|homedepot|lowes|chase|bankofamerica|wellsfargo|capitalone|citi|discover|americanexpress|usbank|navyfederal|usps|ups\.com|fedex|dhl|netflix|spotify|hulu|disney|steam|playstation|xbox|nintendo|airbnb|expedia|booking\.com|ticketmaster|stubhub)/i;
+const BUY_STRONG=/(order\s*(#|no\.?|number|confirm|receipt|summary|shipped|update)|your (order|receipt|invoice|payment|purchase|statement|booking|reservation|ticket|package|delivery)|payment (received|confirm|successful|failed|due|reminder|processed)|(you paid|you sent|sent you|paid you|you received|you.ve received)\b|statement (is )?(ready|available)|(monthly|account|credit card) statement|has shipped|was shipped|out for delivery|was delivered|has been delivered|tracking (number|info|update)|\bcharged\b|subscription (renewal|receipt|confirm)|e-?ticket|itinerary|booking confirm|reservation confirm|thank you for your (order|purchase|payment)|autopay|transaction alert|(purchase|withdrawal|deposit|transfer) (of|alert))/i;
+const BUY_MED=/\b(receipt|invoice|refund|billing|bill|balance|deposit|withdrawal|transaction|statement|shipped|delivery|tracking|subscription|renewal|purchase|payment|order)\b/i;
+const MONEY=/(\$\s?\d|\busd\b|\btotal\b|order\s*#|order number|tracking number|amount (due|paid)|balance)/i;
+const ADS_STRONG=/(\d{1,3}\s?% (off|cash ?back)|up to \d+%|\bsale\b|\bdeals?\b|coupon|promo(tion|tional)?\b|limited time|last chance|ends (today|tonight|soon)|exclusive|free shipping|shop now|new arrivals|don.t miss|flash|clearance|save (up to|big|\$)|just for you|you.ve been selected|rewards?\b|bonus|gift card|earn \$|invite (a )?friends?|refer (a )?friends?|% apr|pre-?approved|newsletter|weekly digest|\bdigest\b|view (this email )?in (your )?browser|jobs for you|recommended for you|trending|webinar|\bwin\b|giveaway|free breadsticks|\bfree\b)/i;
+const BOT_LOCAL=/^(no-?reply|do-?not-?reply|donotreply|noreply|notifications?|notify|mailer|mailer-daemon|newsletter|news|marketing|offers?|deals?|promo(tions)?|updates?|info|hello|hi|team|support|help|care|service|customerservice|alerts?|billing|orders?|receipts?|invoice|admin|contact|sales|store|shop|accounts?|security|digest|crew|jobs?|careers|events?|communications?|auto-confirm|pkginfo|statements?|no\.reply.*)([._+-].*)?$/i;
+const BIZ_WORD=/\b(inc|llc|ltd|corp|co|company|team|support|service|services|customer|care|help|store|shop|news|alerts?|bank|mail|notifications?|billing|orders?|crew|group|club|hub|app|online|rewards?|deals?|offers?|jobs|careers|university|college|school|health|insurance|pharmacy|credit|union|palace|brew|navy)\b/i;
+const NAME_TWO=/^[A-Z][a-z'’-]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z'’-]+$/;
+const NAME_TITLE=/^(Dr|Mr|Ms|Mrs|Prof)\.?\s+[A-Z][a-z'’-]+(?:\s+[A-Z][a-z'’-]+)?$/;
+const FAMILY=/^(mom|dad|mother|father|grandma|grandpa|sis|bro|aunt|uncle|wife|husband|honey|babe)$/i;
+const CHAT=/\b(hi|hey|hello|dear|thanks|thank you|let me know|can you|could you|are you|do you|call me|see you|talk soon|love|miss you|sounds good|congrats|how are you|can we)\b/i;
+const EMOJI=/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
 
-function classify(m){
+function parseFrom(f){
+  const m=/^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/.exec(f||'');
+  return {name:(m?m[1]:'').trim(),addr:(m?m[2]:(f||'')).trim().toLowerCase()};
+}
+function scoreMsg(m){
   const h={};(m.payload?.headers||[]).forEach(x=>h[x.name.toLowerCase()]=x.value);
-  const labels=m.labelIds||[],from=h.from||'',subj=h.subject||'';
-  const bulk=!!h['list-unsubscribe']||/bulk|list|junk/i.test(h.precedence||'')||!!h['list-id'];
-  const promo=labels.includes('CATEGORY_PROMOTIONS')||PROMO_SUBJ.test(subj);
-  const fin=FIN_FROM.test(from);
-  const bot=BOT_FROM.test(from)||/auto-submitted|bulk/i.test(h['auto-submitted']||'')||bulk;
-  let k;
-  if(!promo&&(BUY_SUBJ.test(subj)||fin&&!PROMO_SUBJ.test(subj)))k='buy';
-  else if(promo||labels.includes('CATEGORY_SOCIAL')||(bulk&&!fin))k='ads';
-  else if(!bot&&!fin&&(labels.includes('CATEGORY_PERSONAL')||!labels.some(l=>l.startsWith('CATEGORY_'))))k='people';
-  else k='skip';
-  return {id:m.id,from:from.replace(/<.*>/,'').replace(/"/g,'').trim()||from,subj:subj||'(no subject)',k};
+  const L=m.labelIds||[],subj=h.subject||'',snip=m.snippet||'',sl=snip.toLowerCase();
+  const {name,addr}=parseFrom(h.from||''),local=addr.split('@')[0]||'';
+  const freemail=FREEMAIL.test(addr),bot=BOT_LOCAL.test(local);
+  const fin=FIN_FROM.test(addr)||FIN_FROM.test(name);
+  const autoSub=!!h['auto-submitted']&&!/^no$/i.test(h['auto-submitted']);
+  const bulk=!!h['list-unsubscribe']||!!h['list-id']||/bulk|list|junk/i.test(h.precedence||'');
+  const person=!bot&&!fin&&((NAME_TWO.test(name)&&!BIZ_WORD.test(name))||NAME_TITLE.test(name)||FAMILY.test(name.trim()));
+  const personal=freemail&&!bot;
+  const promoCat=L.includes('CATEGORY_PROMOTIONS');
+  const adsSubj=ADS_STRONG.test(subj),buySubj=BUY_STRONG.test(subj);
+  let buy=0,ads=0,ppl=0;
+
+  // purchases
+  if(buySubj)buy+=5; else if(BUY_STRONG.test(snip))buy+=2;
+  if(BUY_MED.test(subj))buy+=2; else if(BUY_MED.test(snip))buy+=1;
+  if(fin)buy+=3;
+  if(MONEY.test(snip))buy+=2;
+  if(/\$\s?\d/.test(subj))buy+=1;
+  if(L.includes('CATEGORY_UPDATES'))buy+=1;
+  if(L.some(l=>/PURCHASE/.test(l)))buy+=3;
+  if(promoCat)buy-=3;
+  if(adsSubj&&!buySubj)buy-=3;
+  if(person&&personal)buy-=3;
+
+  // ads
+  if(promoCat)ads+=4;
+  if(L.includes('CATEGORY_SOCIAL'))ads+=2;
+  if(L.includes('CATEGORY_FORUMS'))ads+=1;
+  if(adsSubj)ads+=3; else if(ADS_STRONG.test(snip))ads+=1;
+  if(/unsubscribe/.test(sl))ads+=2;
+  if(bulk)ads+=3;
+  if(bot)ads+=1;
+  if(EMOJI.test(subj))ads+=1;
+  if((subj.match(/\b[A-Z]{4,}\b/g)||[]).length>=2)ads+=1;
+  if(buySubj)ads-=4;
+  if(person&&personal)ads-=2;
+
+  // people
+  if(L.includes('CATEGORY_PERSONAL'))ppl+=3;
+  if(personal)ppl+=3;
+  if(person)ppl+=2;
+  if(person&&name.split(/\s+/)[0]&&local.includes(name.split(/\s+/)[0].toLowerCase().replace(/[^a-z]/g,'')))ppl+=1;
+  if(/^\s*(re|fwd?|fw)\s*:/i.test(subj))ppl+=2;
+  if(!bulk&&!bot&&!autoSub)ppl+=1;
+  if(CHAT.test(snip)||CHAT.test(subj))ppl+=1;
+  if(bulk)ppl-=4;
+  if(autoSub)ppl-=4;
+  if(bot)ppl-=3;
+  if(fin)ppl-=3;
+  if(adsSubj)ppl-=3;
+  if(['CATEGORY_PROMOTIONS','CATEGORY_UPDATES','CATEGORY_SOCIAL','CATEGORY_FORUMS'].some(c=>L.includes(c)))ppl-=2;
+  return {buy,ads,ppl,name,addr};
 }
+function classify(m){
+  const sc=scoreMsg(m);
+  const arr=[['buy',sc.buy],['ads',sc.ads],['people',sc.ppl]].sort((x,y)=>y[1]-x[1]);
+  const best=arr[0][1],second=arr[1][1];
+  let k=arr[0][0];
+  if(best<3||(best-second<2&&best<7))k='skip';
+  const h={};(m.payload?.headers||[]).forEach(x=>h[x.name.toLowerCase()]=x.value);
+  const from=h.from||'';
+  return {id:m.id,from:(sc.name||from).replace(/"/g,'').trim()||from,subj:h.subject||'(no subject)',k};
+}
+/*ENDCLASSIFY*/
 
 $('scan').onclick=async()=>{
   $('scan').disabled=true;$('apply').disabled=true;results={buy:[],people:[],ads:[]};render();
   try{
     say('Reading your inbox...');
-    const list=await g('/messages?maxResults=100&q='+encodeURIComponent('in:inbox'));
+    const list=await g('/messages?maxResults=100&q='+encodeURIComponent('in:inbox'+($('incread').checked?'':' is:unread')));
     const ids=(list.messages||[]).map(m=>m.id);
-    if(!ids.length){say('Inbox is empty.');return}
+    if(!ids.length){say($('incread').checked?'Inbox is empty.':'No unread emails in your inbox.');return}
     let done=0,skipped=0;
     const q=[...ids];
     const worker=async()=>{while(q.length){const id=q.shift();
-      try{const m=await g('/messages/'+id+'?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=List-Unsubscribe&metadataHeaders=List-Id&metadataHeaders=Precedence');
+      try{const m=await g('/messages/'+id+'?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=List-Unsubscribe&metadataHeaders=List-Id&metadataHeaders=Precedence&metadataHeaders=Auto-Submitted');
         const c=classify(m);if(c.k==='skip')skipped++;else results[c.k].push(c);}catch(e){}
       done++;say('Sorting '+done+' of '+ids.length+'...');}};
     await Promise.all([worker(),worker(),worker(),worker(),worker()]);
@@ -381,19 +455,19 @@ $('more').onclick=()=>loadMore(false);
 function b64(s){s=s.replace(/-/g,'+').replace(/_/g,'/');const bin=atob(s);return new TextDecoder().decode(Uint8Array.from(bin,c=>c.charCodeAt(0)))}
 function findPart(p,type){if(p.mimeType===type&&p.body&&p.body.data)return p;for(const c of p.parts||[]){const f=findPart(c,type);if(f)return f}return null}
 function attachments(p,out=[]){if(p.filename)out.push(p.filename);(p.parts||[]).forEach(c=>attachments(c,out));return out}
-let curHtml='',curText='',showImgs=false;
+let curHtml='',curText='';
 function frameDoc(){
-  const img=showImgs?"img-src https: data:":"img-src data:";
+  const img="img-src https: data:";
   return '<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; '+img+'"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font:15px/1.5 system-ui,sans-serif;margin:12px;word-break:break-word;color:#111}img{max-width:100%;height:auto}table{max-width:100%}</style></head><body>'+curHtml+'</body></html>';
 }
 async function openMsg(id){
-  curId=id;
+  curId=id;disarm();
   if(pane!=='view')prevPane=pane;
   showPane('view');
   const inTrash=prevPane==='mail'&&mbox&&mbox.id==='trash';
   document.querySelectorAll('.delbtn').forEach(b=>b.classList.toggle('hide',inTrash));
   $('v-subj').textContent='Loading...';['v-from','v-to','v-date','v-att'].forEach(x=>$(x).textContent='');
-  $('frame').classList.add('hide');$('plain').classList.add('hide');$('imgs').classList.add('hide');
+  $('frame').classList.add('hide');$('plain').classList.add('hide');
   try{
     const m=await g('/messages/'+id+'?format=full');
     const h={};(m.payload.headers||[]).forEach(x=>h[x.name.toLowerCase()]=x.value);
@@ -404,12 +478,11 @@ async function openMsg(id){
     const att=attachments(m.payload);
     $('v-att').textContent=att.length?'Attachments (open in Gmail): '+att.join(', '):'';
     const ph=findPart(m.payload,'text/html'),pt=findPart(m.payload,'text/plain');
-    curHtml=ph?b64(ph.body.data):'';curText=pt?b64(pt.body.data):'';showImgs=false;
-    if(curHtml){$('frame').srcdoc=frameDoc();$('frame').classList.remove('hide');$('imgs').textContent='Show images';$('imgs').classList.remove('hide')}
+    curHtml=ph?b64(ph.body.data):'';curText=pt?b64(pt.body.data):'';
+    if(curHtml){$('frame').srcdoc=frameDoc();$('frame').classList.remove('hide')}
     else{$('plain').textContent=curText||m.snippet||'(no readable content)';$('plain').classList.remove('hide')}
   }catch(e){$('v-subj').textContent='Could not open this email: '+e.message}
 }
-$('imgs').onclick=()=>{showImgs=!showImgs;$('imgs').textContent=showImgs?'Hide images':'Show images';$('frame').srcdoc=frameDoc()};
 
 function closeView(){
   $('frame').srcdoc='';curId=null;
@@ -418,16 +491,22 @@ function closeView(){
 }
 $('back').onclick=closeView;
 
+let armT=null,armed=false;
+function disarm(){armed=false;clearTimeout(armT);document.querySelectorAll('.delbtn').forEach(b=>b.textContent='Delete')}
 function removeFromApp(id){for(const k in results)results[k]=results[k].filter(r=>r.id!==id)}
 async function act(kind){
   if(!curId)return;
   const id=curId;
-  if(kind==='trash'&&!confirm('Move this email to Trash in Gmail? You can restore it from Trash for 30 days.'))return;
+  if(kind==='trash'){
+    if(!armed){armed=true;document.querySelectorAll('.delbtn').forEach(b=>b.textContent='Tap again to confirm');armT=setTimeout(disarm,3500);return}
+    disarm();
+  }
   const btns=document.querySelectorAll('.acts button');
   btns.forEach(b=>b.disabled=true);
   try{
     if(kind==='read'){
-      await g('/messages/'+id+'/modify',{method:'POST',body:JSON.stringify({removeLabelIds:['UNREAD']})});
+      const res=await g('/messages/'+id+'/modify',{method:'POST',body:JSON.stringify({removeLabelIds:['UNREAD']})});
+      if((res.labelIds||[]).includes('UNREAD'))throw new Error('Gmail did not mark it as read');
       removeFromApp(id);mItems.forEach(r=>{if(r.id===id)r.unread=false});
     }else{
       await g('/messages/'+id+'/trash',{method:'POST'});
@@ -435,8 +514,8 @@ async function act(kind){
     }
     closeView();loadCounts();
     const msg=kind==='read'?'Marked as read.':'Moved to Trash in Gmail.';
-    say(msg);mSay(mItems.length||prevPane!=='mail'?'':'Nothing here.');
-  }catch(e){alert('Could not do that: '+e.message)}
+    toast(msg);if(prevPane==='mail'&&!mItems.length)mSay('Nothing here.');
+  }catch(e){toast('Could not do that: '+e.message)}
   finally{btns.forEach(b=>b.disabled=false)}
 }
 document.querySelectorAll('.markread').forEach(b=>b.onclick=()=>act('read'));
